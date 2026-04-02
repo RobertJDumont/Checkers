@@ -7,6 +7,8 @@ let currentPlayer = PLAYER_1;
 let selectedPiece = null;
 let p1PiecesLeft = 20;
 let p2PiecesLeft = 20;
+let isLocked = false;
+let lockedAt = null;
 
 // Elements
 const boardEl = document.getElementById('board');
@@ -16,6 +18,8 @@ const p1StatusEl = document.getElementById('player1-status');
 const p2StatusEl = document.getElementById('player2-status');
 const turnIndicatorEl = document.getElementById('turn-indicator');
 const restartBtn = document.getElementById('restart-btn');
+const lockBtn = document.getElementById('lock-btn');
+const lockTimeEl = document.getElementById('lock-time');
 const overlayEl = document.getElementById('message-overlay');
 const winnerTextEl = document.getElementById('winner-text');
 const playAgainBtn = document.getElementById('play-again-btn');
@@ -26,7 +30,9 @@ function saveState() {
         currentPlayer,
         p1PiecesLeft,
         p2PiecesLeft,
-        selectedPiece
+        selectedPiece,
+        isLocked,
+        lockedAt
     };
     localStorage.setItem('checkers_state', JSON.stringify(state));
 }
@@ -44,6 +50,9 @@ function initGame(forceReset = false) {
                 p1PiecesLeft = state.p1PiecesLeft;
                 p2PiecesLeft = state.p2PiecesLeft;
                 selectedPiece = state.selectedPiece;
+                isLocked = state.isLocked || false;
+                lockedAt = state.lockedAt || null;
+                updateLockUI();
                 updateUI();
                 return;
             } catch(e) {
@@ -52,11 +61,16 @@ function initGame(forceReset = false) {
         }
     }
 
+    if (forceReset && isLocked) return;
+
     board = [];
     currentPlayer = PLAYER_1;
     selectedPiece = null;
     p1PiecesLeft = 20;
     p2PiecesLeft = 20;
+    isLocked = false;
+    lockedAt = null;
+    updateLockUI();
     
     // Initialize logic board
     for (let r = 0; r < BOARD_SIZE; r++) {
@@ -134,29 +148,54 @@ function getValidMoves(r, c) {
     const piece = board[r][c];
     if (!piece || piece.player !== currentPlayer) return [];
     
-    let moves = [];
-    const directions = piece.isKing ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] : 
-                       (piece.player === PLAYER_1 ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]]);
+    let validMoves = [];
+    
+    // Non-kings only move forward, but can jump in all 4 directions. 
+    // Kings can do both in all 4 directions.
+    const moveDirections = piece.isKing ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] : 
+                           (piece.player === PLAYER_1 ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]]);
+    const jumpDirections = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
                        
-    directions.forEach(dir => {
+    // Simple moves
+    moveDirections.forEach(dir => {
+        let nr = r + dir[0], nc = c + dir[1];
+        if (bounds(nr, nc) && board[nr][nc] === null) {
+            validMoves.push({ type: 'move', r: nr, c: nc });
+        }
+    });
+        
+    // Jump moves
+    jumpDirections.forEach(dir => {
         let dr = dir[0], dc = dir[1];
         let nr = r + dr, nc = c + dc;
-        
-        // Simple move
-        if (bounds(nr, nc) && board[nr][nc] === null) {
-            moves.push({ type: 'move', r: nr, c: nc });
-        }
-        
-        // Jump move
         let jr = r + 2 * dr, jc = c + 2 * dc;
+        
         if (bounds(jr, jc) && bounds(nr, nc) && 
             board[nr][nc] !== null && board[nr][nc].player !== piece.player && 
             board[jr][jc] === null) {
-            moves.push({ type: 'jump', r: jr, c: jc, captured: { r: nr, c: nc } });
+            validMoves.push({ type: 'jump', r: jr, c: jc, captured: { r: nr, c: nc } });
         }
     });
     
-    return moves;
+    return validMoves;
+}
+
+function hasAnyJumps(player) {
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
+            if (board[r][c] && board[r][c].player === player) {
+                const tempCurrent = currentPlayer;
+                currentPlayer = player;
+                const moves = getValidMoves(r, c);
+                currentPlayer = tempCurrent;
+                
+                if (moves.some(m => m.type === 'jump')) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 function bounds(r, c) {
@@ -164,7 +203,7 @@ function bounds(r, c) {
 }
 
 function handleSquareClick(r, c) {
-    if (currentPlayer === 0) return; // Game over
+    if (currentPlayer === 0 || isLocked) return; // Game over or locked
     
     const clickedPiece = board[r][c];
     
@@ -177,6 +216,12 @@ function handleSquareClick(r, c) {
                  return; // Ignore selecting other pieces
              }
         } else {
+            if (hasAnyJumps(currentPlayer)) {
+                const movesForClicked = getValidMoves(r, c);
+                if (!movesForClicked.some(m => m.type === 'jump')) {
+                    return; // Forced jump required, cannot select this piece
+                }
+            }
             selectedPiece = { r, c };
             updateUI();
         }
@@ -186,7 +231,13 @@ function handleSquareClick(r, c) {
     // Move to empty square
     if (!clickedPiece && selectedPiece) {
         const moves = getValidMoves(selectedPiece.r, selectedPiece.c);
-        const move = moves.find(m => m.r === r && m.c === c);
+        
+        let filterMoves = moves;
+        if (selectedPiece.mustJump || hasAnyJumps(currentPlayer)) {
+            filterMoves = moves.filter(m => m.type === 'jump');
+        }
+
+        const move = filterMoves.find(m => m.r === r && m.c === c);
         
         if (move) {
             executeMove(move);
@@ -253,7 +304,10 @@ function highlightValidMoves() {
     const moves = getValidMoves(selectedPiece.r, selectedPiece.c);
     
     // If must jump, filter only jumps
-    const filterMoves = selectedPiece.mustJump ? moves.filter(m => m.type === 'jump') : moves;
+    let filterMoves = moves;
+    if (selectedPiece.mustJump || hasAnyJumps(currentPlayer)) {
+        filterMoves = moves.filter(m => m.type === 'jump');
+    }
     
     const squares = boardEl.children;
     filterMoves.forEach(m => {
@@ -300,6 +354,35 @@ function checkWinCondition() {
 
 restartBtn.addEventListener('click', () => initGame(true));
 playAgainBtn.addEventListener('click', () => initGame(true));
+
+function toggleLock() {
+    isLocked = !isLocked;
+    if (isLocked) {
+        lockedAt = new Date().toLocaleString();
+    } else {
+        lockedAt = null;
+    }
+    updateLockUI();
+    saveState();
+}
+
+function updateLockUI() {
+    if (isLocked) {
+        lockBtn.textContent = 'Unlock Game';
+        lockBtn.classList.add('locked');
+        if (lockedAt) {
+            lockTimeEl.textContent = `Locked: ${lockedAt}`;
+            lockTimeEl.classList.remove('hidden');
+        }
+    } else {
+        lockBtn.textContent = 'Lock Game';
+        lockBtn.classList.remove('locked');
+        lockTimeEl.classList.add('hidden');
+        lockTimeEl.textContent = '';
+    }
+}
+
+lockBtn.addEventListener('click', toggleLock);
 
 // Start game on load
 initGame();
