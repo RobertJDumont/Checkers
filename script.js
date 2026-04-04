@@ -9,6 +9,7 @@ let p1PiecesLeft = 20;
 let p2PiecesLeft = 20;
 let isLocked = false;
 let lockedAt = null;
+let currentTurnCaptured = [];
 
 // Elements
 const boardEl = document.getElementById('board');
@@ -32,7 +33,8 @@ function saveState() {
         p2PiecesLeft,
         selectedPiece,
         isLocked,
-        lockedAt
+        lockedAt,
+        currentTurnCaptured
     };
     localStorage.setItem('checkers_state', JSON.stringify(state));
 }
@@ -52,6 +54,7 @@ function initGame(forceReset = false) {
                 selectedPiece = state.selectedPiece;
                 isLocked = state.isLocked || false;
                 lockedAt = state.lockedAt || null;
+                currentTurnCaptured = state.currentTurnCaptured || [];
                 updateLockUI();
                 updateUI();
                 return;
@@ -70,6 +73,7 @@ function initGame(forceReset = false) {
     p2PiecesLeft = 20;
     isLocked = false;
     lockedAt = null;
+    currentTurnCaptured = [];
     updateLockUI();
     
     // Initialize logic board
@@ -112,6 +116,10 @@ function renderBoard() {
                 pieceEl.classList.add(pieceData.player === PLAYER_1 ? 'player1' : 'player2');
                 if (pieceData.isKing) pieceEl.classList.add('king');
                 
+                if (currentTurnCaptured.some(cap => cap.r === r && cap.c === c)) {
+                    pieceEl.classList.add('captured');
+                }
+                
                 if (selectedPiece && selectedPiece.r === r && selectedPiece.c === c) {
                     squareEl.classList.add('selected');
                 }
@@ -144,58 +152,135 @@ function updateUI() {
     checkWinCondition();
 }
 
-function getValidMoves(r, c) {
-    const piece = board[r][c];
-    if (!piece || piece.player !== currentPlayer) return [];
-    
+function getRawMoves(r, c, bState, capturedPieces) {
+    const piece = bState[r][c];
+    if (!piece) return [];
     let validMoves = [];
     
-    // Non-kings only move forward, but can jump in all 4 directions. 
-    // Kings can do both in all 4 directions.
-    const moveDirections = piece.isKing ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] : 
-                           (piece.player === PLAYER_1 ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]]);
-    const jumpDirections = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
-                       
-    // Simple moves
-    moveDirections.forEach(dir => {
-        let nr = r + dir[0], nc = c + dir[1];
-        if (bounds(nr, nc) && board[nr][nc] === null) {
-            validMoves.push({ type: 'move', r: nr, c: nc });
-        }
-    });
+    if (piece.isKing) {
+        const directions = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
+        directions.forEach(dir => {
+            let step = 1;
+            let foundOpponent = null;
+            while (true) {
+                let nr = r + step * dir[0], nc = c + step * dir[1];
+                if (!bounds(nr, nc)) break;
+                
+                let target = bState[nr][nc];
+                let isCap = capturedPieces.some(cap => cap.r === nr && cap.c === nc);
+                
+                if (target === null || isCap) {
+                    if (foundOpponent) {
+                        if (target === null) {  
+                            validMoves.push({ type: 'jump', r: nr, c: nc, captured: foundOpponent });
+                        }
+                    } else if (capturedPieces.length === 0 && target === null) {
+                        validMoves.push({ type: 'move', r: nr, c: nc });
+                    }
+                } else {
+                    if (isCap) break; 
+                    if (target.player === piece.player) break;
+                    if (foundOpponent) break;
+                    foundOpponent = {r: nr, c: nc};
+                }
+                step++;
+            }
+        });
+    } else {
+        const moveDirs = piece.player === PLAYER_1 ? [[-1, -1], [-1, 1]] : [[1, -1], [1, 1]];
+        const jumpDirs = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
         
-    // Jump moves
-    jumpDirections.forEach(dir => {
-        let dr = dir[0], dc = dir[1];
-        let nr = r + dr, nc = c + dc;
-        let jr = r + 2 * dr, jc = c + 2 * dc;
-        
-        if (bounds(jr, jc) && bounds(nr, nc) && 
-            board[nr][nc] !== null && board[nr][nc].player !== piece.player && 
-            board[jr][jc] === null) {
-            validMoves.push({ type: 'jump', r: jr, c: jc, captured: { r: nr, c: nc } });
+        if (capturedPieces.length === 0) {
+            moveDirs.forEach(dir => {
+                let nr = r + dir[0], nc = c + dir[1];
+                if (bounds(nr, nc) && bState[nr][nc] === null) {
+                    validMoves.push({ type: 'move', r: nr, c: nc });
+                }
+            });
         }
-    });
-    
+        jumpDirs.forEach(dir => {
+           let nr = r + dir[0], nc = c + dir[1];
+           let jr = r + 2 * dir[0], jc = c + 2 * dir[1];
+           if (bounds(jr, jc) && bounds(nr, nc)) {
+               let target = bState[nr][nc];
+               let landing = bState[jr][jc];
+               let isCap = capturedPieces.some(cap => cap.r === nr && cap.c === nc);
+               let isLandingCap = capturedPieces.some(cap => cap.r === jr && cap.c === jc);
+               
+               if (target !== null && target.player !== piece.player && !isCap && landing === null && !isLandingCap) {
+                   validMoves.push({ type: 'jump', r: jr, c: jc, captured: { r: nr, c: nc } });
+               }
+           }
+        });
+    }
     return validMoves;
 }
 
-function hasAnyJumps(player) {
+function getJumpPaths(r, c, bState, capturedPieces) {
+    let jumps = getRawMoves(r, c, bState, capturedPieces).filter(m => m.type === 'jump');
+    if (jumps.length === 0) return { maxContent: 0, bestPaths: [] };
+    
+    let maxLength = 0;
+    let bestPaths = [];
+    
+    jumps.forEach(jump => {
+        let piece = bState[r][c];
+        bState[r][c] = null;
+        bState[jump.r][jump.c] = piece;
+        capturedPieces.push(jump.captured);
+        
+        let sub = getJumpPaths(jump.r, jump.c, bState, capturedPieces);
+        let pathLength = 1 + sub.maxContent;
+        
+        if (pathLength > maxLength) {
+            maxLength = pathLength;
+            bestPaths = [{ move: jump, maxContent: pathLength }];
+        } else if (pathLength === maxLength) {
+            bestPaths.push({ move: jump, maxContent: pathLength });
+        }
+        
+        capturedPieces.pop();
+        bState[jump.r][jump.c] = null;
+        bState[r][c] = piece;
+    });
+    
+    return { maxContent: maxLength, bestPaths: bestPaths };
+}
+
+function getMaxGlobalJumps(player, bState) {
+    let globalMax = 0;
     for (let r = 0; r < BOARD_SIZE; r++) {
         for (let c = 0; c < BOARD_SIZE; c++) {
-            if (board[r][c] && board[r][c].player === player) {
-                const tempCurrent = currentPlayer;
-                currentPlayer = player;
-                const moves = getValidMoves(r, c);
-                currentPlayer = tempCurrent;
-                
-                if (moves.some(m => m.type === 'jump')) {
-                    return true;
+            if (bState[r][c] && bState[r][c].player === player) {
+                let jInfo = getJumpPaths(r, c, bState, []);
+                if (jInfo.maxContent > globalMax) {
+                    globalMax = jInfo.maxContent;
                 }
             }
         }
     }
-    return false;
+    return globalMax;
+}
+
+function getValidMovesConstrained(r, c) {
+    const piece = board[r][c];
+    if (!piece || piece.player !== currentPlayer) return [];
+    
+    if (currentTurnCaptured.length > 0) {
+       let info = getJumpPaths(r, c, board, currentTurnCaptured);
+       return info.bestPaths.map(p => p.move);
+    }
+    
+    let globalMax = getMaxGlobalJumps(currentPlayer, board);
+    if (globalMax > 0) {
+       let info = getJumpPaths(r, c, board, []);
+       if (info.maxContent === globalMax) {
+           return info.bestPaths.map(p => p.move);
+       }
+       return [];
+    }
+    
+    return getRawMoves(r, c, board, []).filter(m => m.type === 'move');
 }
 
 function bounds(r, c) {
@@ -203,46 +288,33 @@ function bounds(r, c) {
 }
 
 function handleSquareClick(r, c) {
-    if (currentPlayer === 0 || isLocked) return; // Game over or locked
+    if (currentPlayer === 0 || isLocked) return;
     
     const clickedPiece = board[r][c];
     
-    // Select own piece
     if (clickedPiece && clickedPiece.player === currentPlayer) {
         if (selectedPiece && selectedPiece.mustJump) {
              if (selectedPiece.r === r && selectedPiece.c === c) {
-                 // valid, it's the one that must jump
+                 // valid
              } else {
-                 return; // Ignore selecting other pieces
+                 return; 
              }
         } else {
-            if (hasAnyJumps(currentPlayer)) {
-                const movesForClicked = getValidMoves(r, c);
-                if (!movesForClicked.some(m => m.type === 'jump')) {
-                    return; // Forced jump required, cannot select this piece
-                }
-            }
+            let movesForClicked = getValidMovesConstrained(r, c);
+            if (movesForClicked.length === 0) return;
             selectedPiece = { r, c };
             updateUI();
         }
         return;
     }
     
-    // Move to empty square
     if (!clickedPiece && selectedPiece) {
-        const moves = getValidMoves(selectedPiece.r, selectedPiece.c);
-        
-        let filterMoves = moves;
-        if (selectedPiece.mustJump || hasAnyJumps(currentPlayer)) {
-            filterMoves = moves.filter(m => m.type === 'jump');
-        }
-
+        const filterMoves = getValidMovesConstrained(selectedPiece.r, selectedPiece.c);
         const move = filterMoves.find(m => m.r === r && m.c === c);
         
         if (move) {
             executeMove(move);
         } else {
-            // Clicked empty square but invalid move, deselect if not forced to jump
             if (!selectedPiece.mustJump) {
                 selectedPiece = null;
                 updateUI();
@@ -255,11 +327,9 @@ function handleSquareClick(r, c) {
 function executeMove(move) {
     const piece = board[selectedPiece.r][selectedPiece.c];
     
-    // Move piece
     board[move.r][move.c] = piece;
     board[selectedPiece.r][selectedPiece.c] = null;
     
-    // Check Kinging
     let promote = false;
     if (!piece.isKing) {
         if ((piece.player === PLAYER_1 && move.r === 0) || 
@@ -271,26 +341,27 @@ function executeMove(move) {
     
     let jumped = false;
     if (move.type === 'jump') {
-        const cap = move.captured;
-        board[cap.r][cap.c] = null;
-        if (piece.player === PLAYER_1) p2PiecesLeft--;
-        else p1PiecesLeft--;
+        currentTurnCaptured.push(move.captured);
         jumped = true;
     }
     
-    // Check for multiple jumps if we just jumped
     if (jumped && !promote) {
-        selectedPiece = { r: move.r, c: move.c };
-        const furtherMoves = getValidMoves(move.r, move.c).filter(m => m.type === 'jump');
-        if (furtherMoves.length > 0) {
-             selectedPiece.mustJump = true;
+        selectedPiece = { r: move.r, c: move.c, mustJump: true };
+        let fut = getValidMovesConstrained(move.r, move.c);
+        if (fut.length > 0) {
              updateUI();
              saveState();
-             return; // Don't switch turns
+             return;
         }
     }
     
-    // End Turn
+    currentTurnCaptured.forEach(cap => {
+        board[cap.r][cap.c] = null;
+        if (currentPlayer === PLAYER_1) p2PiecesLeft--;
+        else p1PiecesLeft--;
+    });
+    currentTurnCaptured = [];
+    
     selectedPiece = null;
     currentPlayer = currentPlayer === PLAYER_1 ? PLAYER_2 : PLAYER_1;
     
@@ -301,14 +372,7 @@ function executeMove(move) {
 function highlightValidMoves() {
     if (!selectedPiece) return;
     
-    const moves = getValidMoves(selectedPiece.r, selectedPiece.c);
-    
-    // If must jump, filter only jumps
-    let filterMoves = moves;
-    if (selectedPiece.mustJump || hasAnyJumps(currentPlayer)) {
-        filterMoves = moves.filter(m => m.type === 'jump');
-    }
-    
+    const filterMoves = getValidMovesConstrained(selectedPiece.r, selectedPiece.c);
     const squares = boardEl.children;
     filterMoves.forEach(m => {
         const index = m.r * BOARD_SIZE + m.c;
@@ -326,12 +390,8 @@ function checkWinCondition() {
         for (let c = 0; c < BOARD_SIZE; c++) {
             if (board[r][c]) {
                 const player = board[r][c].player;
-                const tempCurrent = currentPlayer;
-                currentPlayer = player;
-                const moves = getValidMoves(r, c);
-                currentPlayer = tempCurrent;
-                
-                if (moves.length > 0) {
+                let raw = getRawMoves(r, c, board, []);
+                if (raw.length > 0) {
                     if (player === PLAYER_1) p1HasMoves = true;
                     if (player === PLAYER_2) p2HasMoves = true;
                 }
@@ -344,7 +404,7 @@ function checkWinCondition() {
     if (p2PiecesLeft === 0 || (!p2HasMoves && currentPlayer === PLAYER_2)) winner = 1;
     
     if (winner) {
-        currentPlayer = 0; // stop play
+        currentPlayer = 0; 
         winnerTextEl.textContent = `Player ${winner} Wins!`;
         winnerTextEl.style.color = winner === 1 ? 'var(--p1-piece)' : 'var(--p2-piece)';
         overlayEl.classList.remove('hidden');
