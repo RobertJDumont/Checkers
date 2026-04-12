@@ -1,11 +1,12 @@
-const CACHE_NAME = 'checkers-cache-v4';
+const CACHE_NAME = 'checkers-cache-v5';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
     './style.css',
     './script.js',
     './manifest.json',
-    './icon.svg'
+    './icon-192.png',
+    './icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {
